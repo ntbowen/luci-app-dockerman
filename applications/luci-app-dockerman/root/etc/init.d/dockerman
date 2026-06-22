@@ -56,6 +56,17 @@ convert() {
 	uci_commit dockerd
 }
 
+# Detect whether dockerd leaves firewall management to the system firewall.
+# With "iptables 0" or the nftables firewall backend, dockerd creates no
+# iptables rules (no DOCKER-USER chain), so the legacy DOCKER-MAN chain below
+# would be dead code that only conflicts with fw4. In that case access control
+# for published ports is handled natively by the fw4 INPUT zone policy.
+fw_managed_by_dockerd(){
+	[ "$(uci -q get dockerd.globals.iptables)" = "0" ] && return 0
+	[ "$(uci -q get dockerd.globals.firewall_backend)" = "nftables" ] && return 0
+	return 1
+}
+
 iptables_append(){
 	# Wait for a maximum of 10 second per command, retrying every millisecond
 	local iptables_wait_args="--wait 10 --wait-interval 1000"
@@ -101,8 +112,116 @@ handle_allowed_interface(){
 	iptables_append DOCKER-MAN -j RETURN >/dev/null 2>&1
 }
 
+# --- fw4 (nftables backend) access control ---------------------------------
+# In the nftables backend published ports are exposed on the host by
+# docker-proxy and reach the host INPUT chain. Access control is therefore
+# expressed as fw4 traffic rules in the input chain instead of the legacy
+# DOCKER-MAN iptables chain. All generated rules are pure ACCEPT (additive,
+# no default-deny) so they can never lock the router out; wan stays closed by
+# the default zone policy unless a port is explicitly listed.
+FW4_RULE_PREFIX="dockerman_"
+
+fw4_sanitize(){
+	echo "$1" | tr -c 'A-Za-z0-9_' '_'
+}
+
+fw4_cleanup_rules(){
+	local name
+	for name in $(uci -q show firewall | sed -n "s/^firewall\.\(${FW4_RULE_PREFIX}[A-Za-z0-9_]*\)=rule$/\1/p"); do
+		uci -q delete "firewall.${name}"
+	done
+}
+
+fw4_add_port_rule(){
+	local entry="$1" port proto name
+	case "$entry" in
+		*/tcp) proto="tcp"; port="${entry%/tcp}" ;;
+		*/udp) proto="udp"; port="${entry%/udp}" ;;
+		*) return ;;
+	esac
+	[ -n "$port" ] || return
+	name="${FW4_RULE_PREFIX}p_$(fw4_sanitize "${port}_${proto}")"
+	uci -q set "firewall.${name}=rule"
+	uci -q set "firewall.${name}.name=${name}"
+	uci -q set "firewall.${name}.src=*"
+	uci -q set "firewall.${name}.proto=${proto}"
+	uci -q set "firewall.${name}.dest_port=${port}"
+	uci -q set "firewall.${name}.target=ACCEPT"
+}
+
+# Emit a single fw4 input rule. $5 (device) is optional.
+fw4_set_rule(){
+	local name="$1" proto="$2" port="$3" target="$4" device="$5"
+	uci -q set "firewall.${name}=rule"
+	uci -q set "firewall.${name}.name=${name}"
+	uci -q set "firewall.${name}.src=*"
+	uci -q set "firewall.${name}.proto=${proto}"
+	uci -q set "firewall.${name}.dest_port=${port}"
+	uci -q set "firewall.${name}.target=${target}"
+	[ -n "$device" ] && uci -q set "firewall.${name}.device=${device}"
+}
+
+# List published host ports of running containers as "PORT PROTO" lines.
+fw4_published_ports(){
+	docker ps --format '{{.Ports}}' 2>/dev/null | tr ',' '\n' | \
+		sed -n 's/.*:\([0-9][0-9]*\)->[0-9][0-9]*\/\(tcp\|udp\).*/\1 \2/p' | sort -u
+}
+
+DOCKERMAN_ALLOWED_PORTS=""
+DOCKERMAN_ALLOWED_IFACES=""
+
+fw4_collect_port(){
+	local entry="$1" port proto
+	case "$entry" in
+		*/tcp) proto="tcp"; port="${entry%/tcp}" ;;
+		*/udp) proto="udp"; port="${entry%/udp}" ;;
+		*) return ;;
+	esac
+	DOCKERMAN_ALLOWED_PORTS="${DOCKERMAN_ALLOWED_PORTS} ${port}/${proto}"
+}
+
+fw4_collect_iface(){
+	[ -n "$1" ] && DOCKERMAN_ALLOWED_IFACES="${DOCKERMAN_ALLOWED_IFACES} $1"
+}
+
+fw4_apply_access_control(){
+	fw4_cleanup_rules
+	if [ "$(uci -q get dockerd.dockerman.ac_firewall)" = "1" ]; then
+		DOCKERMAN_ALLOWED_PORTS=""
+		DOCKERMAN_ALLOWED_IFACES=""
+		config_list_foreach "dockerman" "ac_allowed_ports" fw4_collect_port
+		config_list_foreach "dockerman" "ac_allowed_interface" fw4_collect_iface
+
+		# 1) Ports explicitly allowed from ANY zone (including wan).
+		config_list_foreach "dockerman" "ac_allowed_ports" fw4_add_port_rule
+
+		# 2) For every other published port: accept the listed interfaces and
+		#    drop the rest. The drop is scoped to that published port only, so
+		#    host services (ssh/luci) are never affected -> no lock-out risk.
+		fw4_published_ports | while read -r port proto; do
+			[ -n "$port" ] || continue
+			case " ${DOCKERMAN_ALLOWED_PORTS} " in
+				*" ${port}/${proto} "*) continue ;;
+			esac
+			for ifc in ${DOCKERMAN_ALLOWED_IFACES}; do
+				fw4_set_rule "${FW4_RULE_PREFIX}acc_${port}_${proto}_$(fw4_sanitize "$ifc")" \
+					"$proto" "$port" "ACCEPT" "$ifc"
+			done
+			fw4_set_rule "${FW4_RULE_PREFIX}deny_${port}_${proto}" "$proto" "$port" "DROP"
+		done
+	fi
+	uci -q commit firewall
+	fw4 reload >/dev/null 2>&1
+}
+
 start_service(){
 	[ -x "$_DOCKERD" ] && $($_DOCKERD enabled) || return 0
+	# nftables backend / iptables disabled: fw4 owns access control.
+	# Map ac_allowed_* to fw4 input rules instead of the legacy DOCKER-MAN chain.
+	if fw_managed_by_dockerd; then
+		fw4_apply_access_control
+		return 0
+	fi
 	delete_dockerman_chain
 	$($_DOCKERD running) && docker_running || return 0
 	init_dockerman_chain
@@ -111,6 +230,12 @@ start_service(){
 }
 
 stop_service(){
+	if fw_managed_by_dockerd; then
+		fw4_cleanup_rules
+		uci -q commit firewall
+		fw4 reload >/dev/null 2>&1
+		return 0
+	fi
 	delete_dockerman_chain
 }
 

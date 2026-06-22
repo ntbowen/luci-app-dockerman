@@ -115,12 +115,18 @@ o:depends("remote_endpoint", 1)
 -- o = s:taboption("dockerman", Value, "debug_path", translate("Debug Tempfile Path"), translate("Where you want to save the debug tempfile"))
 
 if nixio.fs.access("/usr/bin/dockerd") and not m.uci:get_bool("dockerd", "dockerman", "remote_endpoint")  then
+	o = s:taboption("ac", Flag, "ac_firewall", translate("Enable firewall access control"), translate("With the nftables firewall backend, map the rules below to fw4 input rules. When disabled, published ports follow the default firewall zone policy (LAN allowed, WAN blocked)."))
+	o.default = "0"
+	o.rmempty = false
+
 	o = s:taboption("ac", DynamicList, "ac_allowed_interface", translate("Allowed access interfaces"), translate("Which interface(s) can access containers under the bridge network, fill-in Interface Name"))
+	o:depends("ac_firewall", "1")
 	local interfaces = luci.sys and luci.sys.net and luci.sys.net.devices() or {}
 	for i, v in ipairs(interfaces) do
 		o:value(v, v)
 	end
-	o = s:taboption("ac", DynamicList, "ac_allowed_ports", translate("Ports allowed to be accessed"), translate("Which Port(s) can be accessed, it's not restricted by the Allowed Access interfaces configuration. Use this configuration with caution!"))
+	o = s:taboption("ac", DynamicList, "ac_allowed_ports", translate("Ports allowed to be accessed"), translate("Which Port(s) can be accessed from ANY zone including WAN, regardless of the Allowed Access interfaces. Use this configuration with caution!"))
+	o:depends("ac_firewall", "1")
 	o.placeholder = "8080/tcp"
 	local docker = require "luci.model.docker"
 	local containers, res, lost_state
