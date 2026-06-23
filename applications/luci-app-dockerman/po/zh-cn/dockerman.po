@@ -1010,17 +1010,30 @@ msgstr ""
 "按下导入按钮时，既可以将本地镜像文件加载到系统上，也可以从远程下载有效的Tar格"
 "式的镜像文件。"
 
-#: applications/luci-app-dockerman/luasrc/model/cbi/dockerman/configuration.lua:124
+#: applications/luci-app-dockerman/luasrc/model/cbi/dockerman/configuration.lua:128
 msgid ""
-"Which Port(s) can be accessed, it's not restricted by the Allowed Access "
-"interfaces configuration. Use this configuration with caution!"
-msgstr "设置可以被访问的端口，该配置不受“允许的访问接口”配置的限制。请谨慎使用该配置选项！"
+"Which Port(s) can be accessed from ANY zone including WAN, regardless of the "
+"Allowed Access interfaces. Use this configuration with caution!"
+msgstr "设置可以从任意区域（包括 WAN）访问的端口，不受“允许的访问接口”配置的限制。请谨慎使用该配置选项！"
 
-#: applications/luci-app-dockerman/luasrc/model/cbi/dockerman/configuration.lua:118
+#: applications/luci-app-dockerman/luasrc/model/cbi/dockerman/configuration.lua:122
 msgid ""
 "Which interface(s) can access containers under the bridge network, fill-in "
 "Interface Name"
 msgstr "哪些接口可以访问桥接网络下的容器，请填写接口名称"
+
+#: applications/luci-app-dockerman/luasrc/model/cbi/dockerman/configuration.lua:118
+msgid "Enable firewall access control"
+msgstr "启用防火墙访问控制"
+
+#: applications/luci-app-dockerman/luasrc/model/cbi/dockerman/configuration.lua:118
+msgid ""
+"With the nftables firewall backend, map the rules below to fw4 input rules. "
+"When disabled, published ports follow the default firewall zone policy (LAN "
+"allowed, WAN blocked)."
+msgstr ""
+"在 nftables 防火墙后端下，将下方规则映射为 fw4 input 规则。关闭时，发布端口遵循"
+"默认的防火墙区域策略（允许 LAN，阻止 WAN）。"
 
 #~ msgid "Containers allowed to be accessed"
 #~ msgstr "允许访问的容器"
